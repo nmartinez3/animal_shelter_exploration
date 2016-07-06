@@ -1,0 +1,800 @@
+---
+title: "Austin Animal Center Data Exploration and Classification"
+author: "Nathan Martinez"
+date: "June 21, 2016"
+output: html_document
+---
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 110)
+```
+##Introduction
+
+In this project, I will be using data from the Austin Animal Center to predict the outcomes of animals from their animal shelters. The data set includes 9 predictor variables (not all of which are useful) for 38185 different cats and dogs from animal shelters in Austin, TX, and the response variable we are trying to predict is `OutcomeType` (this is the type of outcome for each animal at the animal shelters). I will first import the data, then explore the relationship between the response variable and each predictor variable, then perform some quick feature engineering and missing value imputation, and finally build a random forest classification model to predict the outcomes of animals from the test data set. Shoutout to Megan Risdal for some inspiration. Let the fun begin!
+
+***
+
+##Importing the Data
+
+First, let's import both the test and training data sets. I will join them together to make feature engineering easier, and add a variable to each data set to denote whether the observation belongs to the test or training data set in order to keep track of which observations come from which data sets.
+
+```{r}
+#importing data
+train<-read.csv("./train.csv",header=T)
+test<-read.csv("./test.csv",header=T)
+
+#using str() to take a quick look at both data sets
+str(train)
+str(test)
+
+#correcting column names and converting all column classes to character so the two data sets can be joined
+colnames(test)[1]<-"AnimalID"
+for(i in 1:ncol(train)){
+      train[,i]<-as.character(train[,i])
+}
+for(i in 1:ncol(test)){
+      test[,i]<-as.character(test[,i])
+}
+
+#adding variable to distinguish between training and test observations
+train$data<-"train"
+test$data<-"test"
+
+#loading dplyr for bind_rows()
+suppressMessages(require(dplyr))
+
+#merging both data sets to make feature engineering easier
+full<-data.frame(bind_rows(train,test))
+
+#converting certain variables back to factor
+full$OutcomeType<-factor(full$OutcomeType)
+full$OutcomeSubtype<-factor(full$OutcomeSubtype)
+full$AnimalType<-factor(full$AnimalType)
+full$SexuponOutcome<-factor(full$SexuponOutcome)
+full$AgeuponOutcome<-factor(full$AgeuponOutcome)
+full$data<-factor(full$data)
+full$Breed<-factor(full$Breed)
+full$Color<-factor(full$Color)
+
+#bringing up summary(full) to check everything out
+summary(full)
+```
+
+***
+
+##Inspecting and Cleaning the Data, Feature Engineering, and Imputing Missing Values
+In the above `summary(full)` output, we get a quick glimpse of each variable. In this section, I will explore each variable in greater detail, create new predictor variables out of old ones as I go along, and correct missing values where I encounter them.
+
+###Name
+Let's take a look at our fist variable, `Name`. I wouldn't think that an animal's name would have much bearing on its outcome, but thanks to some inspiration from Megan Risdal I have learned to think otherwise.
+```{r}
+full$Name[1:20]
+summary(full$Name)
+```
+
+At first glance, we can tell that a bunch of animals don't have any names. Let's make a new variable that captures whether or not an animal has a name and see if it has any effect on `OutcomeType`.
+```{r}
+#making our nameless variable
+full$nameless<-ifelse(full$Name=="","Nameless","Named")
+full$nameless<-factor(full$nameless,levels=c("Named","Nameless"))
+full[1:20,] %>% select(Name,nameless)
+summary(full$nameless)
+```
+
+Alright, it looks like our new `nameless` variable is working like its supposed to. Now lets plot it out and see if there's a relationship between whether or not an animal has a name and what outcome it ends up having.
+```{r}
+#loading ggplot2 for graphics 
+suppressMessages(require(ggplot2))
+
+#plotting out our nameless variable
+ggplot(full[full$data=="train",],aes(x=nameless,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Named vs. Nameless",y="Proportion of Animals",title="Outcome Type for Named vs. Nameless Cats and Dogs")
+```
+
+Very interesting, it appears that there is indeed a stark difference between outcomes for nameless cats and dogs versus those with names. Named animals are much less likely to get transfered than nameless animals, and named animals are also substantially less likely to die or be euthanized. The difference between likelihoods of dying or getting euthanized for named versus unnamed animals makes sense; if a cat or dog enters an animal shelter without a name, it was probably living on the streets longer, lost its nametag from being out there for so long, and thus was found in poorer health than a named animal. Nameless animals are also much less likely to be returned to their owners, which makes sense since animals that are lacking names are probably also lacking contact information for their owners. Interestingly though, named cats are much more likely to be adopted than unnamed cats, but named dogs have just about the same likelihood of adoption as nameless ones.
+
+Since our new variable `nameless` offers significant insight into animals' outcomes, **it will be included in our final model**.
+
+###DateTime
+Let's look at the variable `DateTime`.
+```{r}
+full$DateTime[1:20]
+summary(full$DateTime)
+```
+
+It would appear that `full$DateTime` contains a bunch of date and time values. As such, we should convert this variable to class `POSIXct`.
+```{r}
+full$DateTime<-as.POSIXct(strptime(full$DateTime, "%Y-%m-%d %H:%M:%S"))
+full$DateTime[1:20]
+class(full$DateTime)
+```
+
+On its own, I don't think `DateTime` will offer much insight into how animals end up at an animal shelter. For `DateTime` to offer insight into animals' outcomes, there would have to be some type of relationship between `DateTime` and `OutcomeType` such that as `DateTime` increases, certain classes of `OutcomeType` become more or less likely to occur. For example, there would have to be periods of time where the amount of animals getting adopted is falling consistently relative to other outcomes or the amount of animals getting transfered is rising consistently relative to other outcome.
+
+To make sure there aren't any clear trends over time in the `DateTime` variable for each `OutcomeType`, let's make a density plot of `DateTime` for each possible outcome type and see how the densities vary for each outcome. This will show the amount of animals in each `OutcomeType` over all of our ranges of dates and times. Again, if one outcome type is moving in a certain direction while others aren't, then `DateTime` may actually offer some insight into how animals end up since this would indicate that there's some type of relationship between `DateTime` and `OutcomeType`. If all the density curves appear to move together, this would indicate that there's no relationship between `DateTime` and `OutcomeType` and that `DateTime` doesn't offer any insight into how animal outcomes occur.
+
+```{r}
+#plotting density curves
+ggplot(full[full$data=="train",],aes(x=DateTime,fill=OutcomeType))+
+      geom_density(alpha=0.9)+
+      facet_grid(OutcomeType~AnimalType)+
+      labs(y="Density",title="DateTime Density Distributions per Outcome Type")
+```
+
+Looking at the graph, there do seem to be some brief trends in the density curves for cats and dogs, but nothing incredibly compelling. Remember, a strong relationship between `DateTime` and `OutcomeType` would manifest itself in this plot as certain outcome types moving in one direction while others move in a different direction as time increases; there doesn't appear to be anything as clear and noticeable as that in this plot. There are a few interesting things to note about the data, though, like how the density curves for cats seem to have two noticeable spikes around July 2014 and July 2015 (with the exception of `Return_to_owner`) while dogs do not. Why is it that cats have more activity in the month of July? Also, the density curve for cats being returned to their owners exhibits no spikes in the July months, so this would mean that cats are less likely to get returned to their owners in July, relative to other outcomes. The dog density curves seem to have no clear trends though. Could there be some seasonal impact on cat outcomes? I originally created this plot with both cats and dogs wrapped up into the same density curves, but after recreating the plot with each `AnimalType` separated, it would appear that there's something more going on here. Interesting stuff.
+
+So what can we do to our `DateTime` variable to make it more meaningful? Well, I have a few ideas of new variables we can create from the `DateTime` variable that might be more insightful than what we have now. First, we could create a time of day variable for morning, afternoon, evening, and night (inspiration from Megan Risdal); the idea here is that maybe certain animal outcomes are more likely to happen at certain times of day (maybe more adoptions happen during the afternoon when people get off work?). Secondly, we could create a variable that distinguishes between seasons (fall, winter, spring, and summer) to try to capture some of the seasonal effects we saw in the `DateTime` variable. Finally, we can try making a categorical variable that distinguishes between either day of the week or weekday/weekend; maybe more adoptions happen on the weekend or on a Friday, for example. I will create these variables below and examine their ability to explain changes in the response variable `OutcomeType`.
+
+####Time of Day
+Here I'll create our time of day variable to represent times as either morning (05:00-11:00), afternoon (11:00-16:00), evening (16:00-22:00), or night (22:00-05:00). The time values I chose are subjective, but I feel that they adequately represent the four main times of day without bringing messy minutes into play. Credit goes to Megan Risdal for inspiring me to try this idea.
+```{r}
+#loading lubridate for easier date manipulation
+suppressMessages(require(lubridate))
+
+#creating our categorical time of day variable
+full$timeofday<-ifelse(hour(full$DateTime)>=5&hour(full$DateTime)<11,"Morning",
+                  ifelse(hour(full$DateTime)>=11&hour(full$DateTime)<16,"Afternoon",
+                  ifelse(hour(full$DateTime)>=16&hour(full$DateTime)<22,"Evening","Night")))
+full$timeofday<-factor(full$timeofday,levels=c("Morning","Afternoon","Evening","Night"))
+summary(full$timeofday)
+```
+
+Here we have our completed `timeofday` variable. What's interesting to note is how few animals have an outcome during the night time. There's a few things that could explain this, with the most obvious one being the fact that very few people are out looking for animals to adopt in the dead of night (because most places are closed). There are also probably very few staff at animal shelters during the night, which would also contribute to the lack of activity during the night time.
+
+Let's plot out the data to get a better idea of what's going on at each time of the day. Credit goes to Megan Risdal for the code to create the plot.
+```{r}
+#plot the data
+ggplot(full[full$data=="train",],aes(x=timeofday,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      coord_flip()+
+      facet_grid(.~AnimalType)+
+      labs(y="Proportion of Animals",x="Time of Day",title="Outcome Type for Cats and Dogs per Time of Day")
+```
+
+Ok, so there's definitely something going on between time of day and `OutcomeType`. Immediately, a few things stand out to me, like the fact that both cats and dogs are much more likely to get transfered than other outcomes at night and how both cats and dogs are more likely to get adopted during the evening (as opposed to other outcomes). Also, it seems that the majority of dog euthanizations happen in the morning, cats are more likely to die during the morning or night time, and dogs are more likely to die in the morning. I find it odd that animal death isn't evenly distributed among the four time periods, since I feel like the time of day being morning doesn't actually make cats and dogs more likely to suddenly just die. Let's bring up a table of `timeofday` vs. `OutcomeType` for both cats and dogs to make sure what we're seeing in the plot is correct.
+```{r}
+#Cat outcomes per time of day
+with(full[full$AnimalType=="Cat",],table(timeofday,OutcomeType))
+
+#Dog outcomes per time of day
+with(full[full$AnimalType=="Dog",],table(timeofday,OutcomeType))
+```
+
+Looking at the tables, we can see that animal death is actually pretty evenly distributed throughout the day for both cats and dogs, and the majority of euthanizations actually happen during the afternoon for both animals. Does this mean that our plot is incorrect? No, it just means that we have to careful with how we interpret it. What the plot is really saying about animal deaths is that given an animal outcome happening in the morning, the odds of that animal outcome being `Died` as opposed to some other outcome is greater than during the rest of the day. The plot is *not* saying that the majority of cat and dog deaths happen during the morning. The same thing can be said for dog euthanizations; the majority of them do not take place during the morning, but given the fact that an animal has an outcome during the morning and that that animal is a dog, the odds of that outcome being euthanasia are higher during the morning then at other times.
+
+Taking all of this into account, the `timeofday` variable we just created does seem to have some explanatory power over `OutcomeType`, so we'll include it in our final model. Let's move on to creating our seasonal variable.
+
+####Season
+Here I'll create our seasonal variable, `season`, to represent Spring (March-May), Summer (June-August), Fall (September-November), and Winter (December-February). Shout out to Wikipedia for telling me which months are in which seasons.
+```{r}
+#creating our seasonal variable
+full$season<-ifelse(month(full$DateTime) %in% c(3,4,5),"Spring",
+                  ifelse(month(full$DateTime) %in% c(6,7,8),"Summer",
+                  ifelse(month(full$DateTime) %in% c(9,10,11),"Fall","Winter")))
+full$season<-factor(full$season,levels=c("Spring","Summer","Fall","Winter"))
+summary(full$season)
+```
+
+Alright, now we have a variable to distinguish between each of the four seasons. Let's plot it out and see if anything is going on in the data that helps explain animals' outcomes.
+```{r}
+#plotting out the seasonal variable
+ggplot(full[full$data=="train",],aes(x=season,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Season",y="Proportion of Animals",title="Outcome Type for Cats and Dogs per Season")
+```
+
+Well, there definitely appears to be something going on here, even if it isn't much. The cat side of the graph definitely has some noticeable differences in outcome probabilities, with cats being less likely to be adopted and more likely to be transferred in the spring. Also, it looks like that during the winter time cats are more likely to be adopted and less likely to be transferred relative to other seasons. There are also subtle differences between probabilities of death, euthanasia, and being returned to their owners. Looking at the dog portion of the graph though is pretty uninteresting; not a lot appears to be changing from one month to the next.
+
+Let's make a variable that distinguishes between each individual month as opposed to just the four seasons and see if it offers more insight into how animal outcomes are determined.
+```{r}
+#creating our 'month' variable
+full$month<-month(full$DateTime,label = TRUE)
+summary(full$month)
+```
+
+Ok, looks like that's done. Now let's plot out the data and see if there's anything going on between month of the year and animal outcome.
+```{r}
+#plotting 'month' vs. 'OutcomeType'
+ggplot(full[full$data=="train",],aes(x=month,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Month of the Year",y="Proportion of Animals",title="Outcome Type for Cats and Dogs per Month of the Year")
+```
+
+Wow, well look at that! There's definitely a lot of variance in outcome type probabilities from one month to the next for cats and some variance for dogs. We even managed to capture the fact that cats are less likely to be returned to their owners in July as opposed to other months (as we observed earlier on in our exploration). The relationship between month of the year and animal outcome doesn't appear to be linear, so keeping our `month` variable discrete is probably the best course of action (as opposed to creating a continuous variable that measured days since the beginning of the year, which would be better if the relationship *was* linear). There's definitely more going on for cats than dogs based on month of the year, but I'm sure that our model will benefit from the inclusion of this variable. As a result, **I will be including** `month` **in my final model**.
+
+####Day of Week and Weekday/Weekend
+In this section I'll try two different approaches to capture the day of the week. First, I'll create a variable that distinguishes between the day of the week falling on either a weekday or a weekend. Then, I'll create a variable that distinguishes between all 7 days of the week. The idea here is that maybe adoptions happen more often on weekends rather than during the week, or maybe adoptions happen more often on Fridays rather than other days. I'll make the two variables below and let the data do the talking, but only one will be included in the final model (if any) since they both aim to capture the same relationship in the data.
+```{r}
+#creating our weekday/weekend variable
+full$weekday<-ifelse(wday(full$DateTime) %in% c(2,3,4,5,6),"Weekday","Weekend")
+full$weekday<-factor(full$weekday,levels=c("Weekday","Weekend"))
+
+#creating our day of the week variable
+full$dayofweek<-wday(full$DateTime,label=TRUE)
+full$dayofweek<-factor(full$dayofweek,levels=c("Mon","Tues","Wed","Thurs","Fri","Sat","Sun"))
+
+summary(full$weekday)
+summary(full$dayofweek)
+```
+
+Alright, now that we've created our two variables, let's see what shows up in the data when we plot each of these two variables vs. the response variable, `OutcomeType`. Let's start with `weekday`.
+```{r}
+#plotting out our weekday variable
+ggplot(full[full$data=="train",],aes(x=weekday,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Weekday or Weekend",y="Proportion of Animals",title="Outcome Type for Cats and Dogs per Weekday/Weekend")
+```
+
+Cool, it looks like `OutcomeType` is indeed distributed differently on weekdays versus weekends. The plot tells us that both cats and dogs are more likely to get adopted and less likely to be transfered on weekends than they are on weekdays. It would make sense that adoptions are more likely to happen on weekends rather than weekdays, since families probably go out to animal shelters together on weekends to adopt animals. Perhaps animal transfers are less likely to occur on weekends since there are less animal shelter employees who are in charge of transfers working on weekends. The other outcomes don't appear to change much, which is to be expected.
+
+Let's see how well our variable `dayofweek` performs.
+```{r}
+#plotting out 'dayofweek' vs. 'OutcomeType'
+ggplot(full[full$data=="train",],aes(x=dayofweek,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Day of the Week",y="Proportion of Animals",title="Outcome Type for Cats and Dogs per Day of the Week")
+```
+
+Looking at the graph, the variable `dayofweek` doesn't seem to explain *too* much more about `OutcomeType` than the variable `weekday`, but there do appear to be small differences in the probability of certain outcome types occurring given the specific day of the week. These small differences could help our random forest model perform better, even if only by a small amount, so I will use the `dayofweek` variable for the final model and exclude the variable `weekday`. Like I mentioned in my conclusionary discussion on the variable `SexuponOutcome`, the random forest model is capable of making its own statistically informed decisions about how certain predictors' categories affect the response variable, so using the variable `weekday` instead of `dayofweek` would offer less information to the `randomForest` algorithm and thus hinder its performance. In other words, having a user manually create bins for a variable just ends up making the final random forest model poorer since the `randomForest` algorithm has been designed to do this task itself.
+
+####Concluding Thoughts for DateTime
+Well, that just about wraps it up for feature engineering with our original `DateTime` variable. Lots of different ideas, lots of cool stuff. Took a decent amount of time and coding, but we're finally through it all. Here are the important points to take note of before moving on:
+
+* `DateTime` on its own **does not** have any explanatory power over `OutcomeType`
+* Our variable `timeofday` for capturing whether or not the animal outcome occurs during morning, afternoon, evening, or night time **does** have explanatory power over `OutcomeType` and **will be included in the final model**
+* Our variables `season` and `month` both aim to capture the changes in outcome probabilities during different times of the year, but `month` captures more of the variance in outcome probabilities than `season`. As a result, **only** `month` **will be included in the final model**
+* Our variables `weekday` and `dayofweek` for differentiating between weekday/weekend and day of the week both have explanatory power over `OutcomeType`, but `dayofweek` offers a little bit more information thatn `weekday`. As such, **only** `dayofweek` **will be included in the final model**
+
+###SexuponOutcome
+Let's take a look at our next variable, `SexuponOutcome`.
+```{r}
+summary(full$SexuponOutcome)
+```
+
+At a glance, we see that there are a bunch of intact male/female animals, neutered/spayed male/female animals, and some unknown animals. There's also one animal with a blank for its sex. If having a blank for your sex isn't "Unknown" then I don't know what is, so I'm going to go ahead and change that animal's sex to `Unknown`.
+```{r}
+#correcting blank observation
+full$SexuponOutcome[full$SexuponOutcome==""]<-"Unknown"
+full$SexuponOutcome<-factor(full$SexuponOutcome)
+summary(full$SexuponOutcome)
+```
+
+Alright, we fixed that issue. Now let's get on to the critical thinking part where we try to think up how an animal's sex can affect its outcome. My hunch is that neutered and spayed animals are probably in higher demand for adoption, since they are less of a hassle to maintain, and as a result will have different likelihoods for the different animal outcomes than intact males and females. Let's make a new variable to distinguish between intact and neutered/spayed animals. We'll keep the `Unknown` animals marked as `Unknown`.
+```{r}
+#creating our new variable 'intact'
+full$intact<-ifelse(grepl("Intact",full$SexuponOutcome),"Intact",
+                    ifelse(grepl("Unknown",full$SexuponOutcome),"Unknown","Neutered/Spayed"))
+full$intact<-factor(full$intact,levels=c("Neutered/Spayed","Intact","Unknown"))
+summary(full$intact)
+```
+
+Time to let the data do the talking. Let's plot out our new variable `intact` vs. `OutcomeType`. Credit to Megan Risdal for inspiring me to use this type of plot.
+```{r}
+#plotting out intact
+ggplot(full[full$data=="train",],aes(x=intact,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      coord_flip()+
+      labs(x="Intact",y="Proportion of Animals",title="Outcome Type for Cats and Dogs per Sexual Organ Intactness")
+```
+
+Just as I had expected, animals that have been neutered or spayed are much more likely to be adopted than animals that are still intact (or animals whose sexual intactness is "Unknown"... still not sure what that entails but it doesn't sound fun or cool). It also looks like animals whose sexual intactness is unknown are actually not adopted at all; lets bring up a table of the data for `intact` versus `OutcomeType` and see if this is true.
+```{r}
+#making a table of intact vs. OutcomeType
+with(full[full$data=="train",],table(intact,OutcomeType))
+```
+
+It looks like I'm right; animals whose sexual intactness is unknown have a **0% chance of adoption**. Pretty cool. Hopefully our random forest model will pick up on this.
+
+Looking back at our plot, there are a few other things that stand out to us. Animals who have not been neutered or spayed are much more likely to be transferred, euthanized, or die. The increased likelihood of being transferred makes sense, since the animals may all be transferred to some other facility in order to get spayed/neutered. The increased likelihood of being euthanized or dying also makes sense, since an animal having their sexual organs intact is probably a good indicator that their owner couldn't afford to take them to the vet to get the procedure done; if their owner couldn't afford that (or couldn't be bothered to take the animal to the vet), then it's likely that the owner also couldn't afford other medical procedures, leaving their animal with other possible medical complications that would ultimately result in their death or euthanization once they reach the animal shelters. Another possible explanation is that animals that haven't been neutered or spayed are so much less likely to get adopted that they end up staying at animal shelters until they die of old age. Interesting stuff once again.
+
+In addition to creating our variable `intact`, we can also create a variable to distinguish between female and male animals. Let's create that variable now.
+```{r}
+#creating variable for 'sex'
+full$sex<-ifelse(grepl("Male",full$SexuponOutcome),"Male",
+                 ifelse(grepl("Female",full$SexuponOutcome),"Female","Unknown"))
+full$sex<-factor(full$sex,levels=c("Male","Female","Unknown"))
+summary(full$sex)
+```
+
+We can see that there's some overlap between `intact` and `sex` in regards to the "Unknown" category, but let's plot out `sex` vs. `OutcomeType` for cats and dogs and see what's going on in the data. I will exclude animals that have a sex of `Unknown` in order to focus on the relationship between an animal being male/female and its outcome.
+```{r}
+#plotting 'sex' vs. 'OutcomeType' for cats and dogs
+ggplot(full[full$data=="train"&full$sex!="Unknown",],aes(x=sex,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Animal Sex",y="Proportion of Animals",title="Outcome Type for Cats and Dogs Based on Sex")
+```
+
+Well, there doesn't appear to be a whole lot of a difference between male and female animals in regards to their outcomes. The most noticeable differences are how femal cats are more likely to be transfered and less likely to die, and female dogs are more likely to be adopted but less likely to be returned to their owners.
+
+Given the relationships in the data we just explored, I have decided that I will use the original `SexuponOutcome` variable in my final model (with the one missing value replaced). Sexual organ intactness definitely helps explain different animals' outcomes, and animal gender provides some small pointers in the right direction as well. Given the nature of the `randomForest` model, creating artificial bins to differentiate between the different categories of `SexuponOutcome` will only hinder model performance, and provided the model the original `SexuponOutcome` will allow it to come to its own statistically informed conclusions about animal outcomes based on both sexual intactness and animal gender (versus being fed new variables that have drawn distinctions between `SexuponOutcome` categories manually and not through statistical procedures).
+
+In summary, I will be using the original variable `SexuponOutcome` in my final model as **it does explain variance in animal outcomes**. I will **not** be using my homemade variables `intact` and `sex`; their main purpose was to help explain the relationship between animal gender/sexual intactness and outcome type visually.
+
+###AgeuponOutcome
+Let's take a look at our next variable, `AgeuponOutcome`.
+```{r}
+summary(full$AgeuponOutcome)
+```
+
+So our age variable right now is not very useful to us. Representing something like age (which should be a continuous variable) as a 46-level categorical variable really prevents us from measuring and observing the true relationship between age and animal outcome. On top of that, the factor levels aren't even in chronological order; if we look closely at the output above, we can see that all the categories with "1" as the first character are grouped together, then all the categories with a "2", and so on. At a minimum, this makes the task of creating a high quality visualization of age vs. outcome very challenging, as we'll have to reorder all of the levels by hand so that they are in order.
+
+Instead of fumbling around with factor levels only to still end up with a mediocre predictor variable, let's go ahead and make a continuous version of our `AgeuponOutcome` variable. Another shoutout to Megan Risdal for the inspiration on how to tackle this problem.
+```{r}
+#first, extract the age number
+agenum<-as.numeric(sapply(full$AgeuponOutcome,function(x) strsplit(as.character(x)," ")[[1]][1]))
+
+#next, extract unit of time
+ageunit<-sapply(full$AgeuponOutcome,function(x) strsplit(as.character(x)," ")[[1]][2])
+unique(ageunit)
+
+#we need to turn entries like "day" and "days" into the same unit
+ageunit<-gsub("s","",ageunit)
+unique(ageunit)
+
+#all fixed. now we need to turn each unit of time into a numeric multiplier
+agemult<-ifelse(ageunit=="day",1,
+            ifelse(ageunit=="week",7,
+            ifelse(ageunit=="month",30,
+            ifelse(ageunit=="year",365,NA))))
+
+#now to create our final continuous age variable
+full$agecont<-agenum*agemult
+summary(full$agecont)
+```
+
+Ok, looks like we have our new continuous age variable. Only one problem remains now, and that's the presence of `r sum(is.na(full$agecont))` missing values. Before we go about replacing those values, let's just take a look at all the observations where `agecont` is `r NA` to see if they have anything in common.
+```{r}
+full[is.na(full$agecont),]
+```
+
+Interesting. Immediately, we can see that *every single animal* that has `NA` for their age value is also nameless. What's also interesting to note is how every single animal had an outcome between February 11th and February 21st, 2016. The similarities in outcome date make this look particularly like a data system/data entry type of error. Maybe one shelter's system was messed up for a couple weeks or a staff member whose responsibility was entering the data was new to the job, etc. Another interesting thing to note is how every one of the animals with `r NA` values for `agecont` are cats, with the exception of one toy poodle. Weird. Stuff like this makes data science cool.
+
+Anyways, let's go ahead and fit a `randomForest` regression model with `agecont` as the response variable and try to predict what the missing `agecont` values should be. `randomForest` doesn't accept any data with `NA` values, so let's make a quick data set out of our `full` data frame containing only the predictor variables we need for this model and excluding all `NA` observations.
+```{r}
+#preparing data set
+not.NA<-full[!is.na(full$agecont),c(6,7,12,13,15,17,20)]
+
+#loading package 'randomForest' for creating the random forest model
+suppressMessages(require(randomForest))
+
+#building randomForest model which will be used to predict NA 'agecont' values
+age.mod<-randomForest(agecont~.,data=not.NA,ntree=600)
+
+#analyzing model fit
+age.mod
+```
+
+Well, let's just say that this model won't be wining us any Nobel Peace Prizes any time soon. Very, very poor fit, but it's the best we can do given our data. I would've included `OutcomeType` in this model, since I'm absolutely certain that an animal's outcome would help explain roughly what age it was, but `r sum(is.na(full$agecont[full$data=="test"&is.na(full$agecont)]))` of the `NA` `agecont` values are in the test data set, which also have `NA` `OutcomeType` values; `randomForest` won't accept any data that has `NA`s in it.
+
+What it comes down to is this: `age.mod`'s MSE is roughly `r mean(age.mod$mse)`, which means that our model's RMSE is `r sqrt(mean(age.mod$mse))`, and thus has an error of about `r sqrt(mean(age.mod$mse))` days in its prediction ability. That means that when our model is trying to predict an animals age, it's off by about `r (sqrt(mean(age.mod$mse)))/365` years on average. Is that innacurate? Very, but can we do better using our own judgement and just guessing? I say no. But would it be better to just use median age in days to replace the `NA` values? Let's see what our RMSE would be with that approach.
+```{r}
+#finding RMSE if every 'agecont' value was predicted to be 'median(agecont)'
+med<-median(not.NA$agecont)
+sqrt(mean((not.NA$agecont-med)^2))
+```
+
+Well, it's clear now that just using the median value would, on average, result in an error of `r sqrt(mean((not.NA$agecont-med)^2))` days when predicting the values of `agecont` (`r sqrt(mean((not.NA$agecont-med)^2))/365` years), which is worse than how our `age.mod` model performed. Let's just go ahead and use `age.mod` to predict the missing `agecont` values even though we know the model isn't really the best in the world (24 missing values out of over 38,000 is pretty insignificant, so whatever error we have in predicting the missing values in `agecont` won't have a big impact on our main model that will predict `OutcomeType`).
+```{r}
+#preparing data set
+age.NA<-full[is.na(full$agecont),c(6,7,12,13,15,17,20)]
+
+#predicting what the missing values should be
+na.pred<-predict(age.mod,age.NA)
+
+#swapping in our new predicted values
+full$agecont[is.na(full$agecont)]<-na.pred
+
+#checking to see we have no more NAs
+summary(full$agecont)
+sum(is.na(full$agecont))
+```
+
+Alright, looks like that's that. Now that we've corrected all of the missing values for `agecont`, let's plot out `agecont` versus `OutcomeType` and see what kind of a relationship is present in the data.
+```{r}
+#plotting agecont vs OutcomeType
+ggplot(full[full$data=="train",],aes(x=OutcomeType,y=agecont,fill=OutcomeType))+
+      geom_boxplot()+
+      coord_flip()+
+      facet_grid(.~AnimalType)+
+      labs(x="Animal Outcome",y="Age in Days",title="Outcome Type for Cats and Dogs per Age in Days")
+```
+
+The plot is a little messy due to how spread out the age distributions are for each outcome type, but we can see that as age increases, animals are less likely to die, get adopted, or get transferred and are more likely to be euthanized or returned to their owner. I think that `agecont` does help explain some of the variance in `OutcomeType`, so it **will be included** in our final model.
+
+###Breed
+Let's take a quick peek at what our `Breed` variable is in its raw state.
+```{r}
+#limiting summary so it doesn't take up a ton of space
+summary(full$Breed)[1:40]
+str(full$Breed)
+```
+
+Currently, our `Breed` variable is just a ton of different breed names thrown into one obnoxiously large factor variable. The main problem with this situation is that having so many different categories for breed doesn't actually help inform us of the true relationship between `Breed` and `OutcomeType`, but another problem is that having more than 53 different levels in a single factor variable prevents it from being used by `randomForest`. Right now, `Breed` has `r length(levels(full$Breed))` different factor levels. That's obscenely large and not at all useful to us.
+
+So what can we do? Looking at the different entries in the `Breed` variable, we can see that there are a large number of breeds that have either the word "Mix" in them or a slash, indicating a cross between two breeds (or more). Why don't we create a variable that distinguishes between dogs and cats that are a pure breed and ones that are a mix. Maybe this will help inform us of the relationship between animal breed and `OutcomeType`; I have a feeling it will most certainly be more useful than our current `Breed` variable.
+```{r}
+#creating new variable for pure/mix
+full$mix<-ifelse(grepl("Mix|/",full$Breed),"Mix","Pure")
+full$mix<-factor(full$mix,levels=c("Mix","Pure"))
+summary(full$mix)
+prop.table(table(full$AnimalType,full$mix),1)
+```
+
+Ok, so we can see right off the bat that very few animals are pure relative to our entire sample of data. If we do the math, `r nrow(full[full$AnimalType=="Cat"&full$mix=="Pure",])/nrow(full[full$AnimalType=="Cat",])*100` percent of cats are purebred and `r nrow(full[full$AnimalType=="Dog"&full$mix=="Pure",])/nrow(full[full$AnimalType=="Dog",])*100` percent of dogs are purebred. That's a pretty small amount. Let's plot out the relationship between `mix` and `OutcomeType` and see if there's anything going on in our new `mix` variable that helps explain animal outcomes.
+```{r}
+#making plot
+ggplot(full[full$data=="train",],aes(x=mix,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Breed Purity",y="Proportion of Animals",title="Outcome Type for Cats and Dogs Based on Breed Purity")
+```
+
+Well, the results aren't super definitive, but there does appear to be some kind of relationship between `mix` and `OutcomeType`. Interestingly enough though, the relationship for cats is opposite that for dogs. It appears that purebred cats are slightly more likely to be adopted and slightly less likely to be transfered while purebred dogs are substantially less likely to be adopted and slightly more likely to be transfered. It also appears that purebred dogs are substantially more likely to be returned to their owners than mixed breed dogs.
+
+I'll include some tables to help us understand the relationsip between `mix` and `OutcomeType` numerically.
+```{r}
+#prepping data for dogs and cats
+cat<-full[full$AnimalType=="Cat"&full$data=="train",]
+dog<-full[full$AnimalType=="Dog"&full$data=="train",]
+
+#creating tables
+cat.mix<-prop.table(table(cat$mix,cat$OutcomeType),1)
+dog.mix<-prop.table(table(dog$mix,dog$OutcomeType),1)
+
+#adding titles so no one gets confused
+names(dimnames(cat.mix))<-list("","Cats")
+names(dimnames(dog.mix))<-list("","Dogs")
+
+cat.mix
+dog.mix
+```
+
+Each table shows the proportion of mixbreed and purebreed animals in each outcome type for both cats and dogs. For example, we can see from these tables that purebreed dogs are 13% less likely to be adopted than mixbreed dogs and purebreed cats are 6% more likely to be adopted than mixbreed cats. For outcomes like death and euthanasia, there doesn't appear to be a significant difference in likelihood between mixbreed and purebreed animals, but the other three outcomes (adoption, transfer, and returned to owner) do appear to have a noticeable difference in likelihood based on whether or not the animal is purebreed or mixbreed. The only catch is that some of these differences in likelihoods are opposite for cats and dogs.
+
+As far as the quality of this variable goes (in regards to its explanatory power over `OutcomeType`), it isn't anything revolutionary, but it does seem to offer some insight into how animal outcomes are determined, so **it will be included in our final model**. The one point of concern is that the relationship is opposite for cats and dogs, but I'm confident that our `randomForest` model will pick up on that.
+
+####Discussion on Possible Improvements for `Breed`
+So is that it for `Breed`? Is it time to move on to our last variable, `Color`? Not yet. I had a few other ideas for how to use breed to predict `OutcomeType` that I wasn't able to follow through with (due to a lack of knowledge on the physical and mental differences between different breeds), but I'd still like to discuss them to shed some light on how this data science challenge could be improved upon further (if someone took the time to gather up all the necessary information).
+
+The `Breed` variable is really one of the most data-rich variables in this entire data set. If one had the knowledge and time, they could assign values to each animal such as height (determined by `Breed` and the animal's age, given by `agecont`), emotional characteristics like aggression/friendliness/calmness (determined by `Breed`), weight (determined by `Breed`), any adverse health risks lurking down the line for each animal (again based on `Breed`), a dog's main functionality (just a small dog to have fun with or a dog to accomplish certain tasks? also determined by `Breed`), and so on and so forth. There really are a ton of possibilities here, but it would take so long to gather all the necessary information and assign it to the `r length(levels(full$Breed))` different breeds of animals in this data set that it's just not worth it at the moment. If somehow in some parallel universe type of situation predicting correct outcomes for each animal was literally the most important thing in the world, then I think this would be a great way to go about improving our model's predictive accuracy. Again, however, it's just not worth the time given the purpose of this project (mainly just to flex my data science knowledge and get some solid practice).
+
+Another idea I had was to try to lump similar breeds together regardless of purity by extracting the first breed name from each animal (and then creating a factor variable with our shorter list of breeds), but this still resulted in too many different categories for one variable since there are a large number of breeds in this data set that have very few animals in them. I'll show you what I came up with.
+```{r}
+#creating shortened breed name variable
+full$breed2<-as.character(full$Breed)
+full$breed2[grepl("/",full$breed2)]<-sapply(full$breed2[grepl("/",full$breed2)],function(x) strsplit(x,"/")[[1]][1])
+full$breed2[grepl("Mix",full$breed2)]<-sapply(full$breed2[grepl("Mix",full$breed2)],function(x) strsplit(x," Mix")[[1]][1])
+full$breed2<-factor(full$breed2)
+
+#finding number of occurrences for each breed
+breed.list<-full %>% group_by(breed2) %>% summarise(count=n()) %>% arrange(desc(count))
+data.frame(breed.list)
+```
+
+Even our shortened list of breeds is far too long at 231 different breeds. If I had the relevant animal knowledge to group these different breeds into more general categories based on animal size, country of origin, or some other defining characteristic, I absolutely would. Unfortunately though, I do not have that knowledge, and this is where my data science journey with `Breed` comes to a halt.
+
+There are also a few typos and missing values in some of the breed names, but correcting the typos (like "Oriental Sh" instead of "Oriental Shorthair") and imputing the missing values (for the observations with "Unknown" as their breed) wouldn't make a difference since we will only be using breed purity (our new variable `mix`) in our final model and will not keep the original `Breed` variable. Also, imputing the correct missing values for those 2 "Unknown" breed animals would be a nightmare, since there would be no good way to guess what the correct values are and fitting a model to predict the correct values would be impossible with so many options to consider.
+
+Anyways, that just about wraps it up for our `Breed` variable, so let's move on to our last variable, `Color`.
+
+###Color
+Like our variable `Breed`, we are faced with a similar situation with our `Color` variable in that there are far too many levels in this categorical variable.
+```{r}
+#limiting summary output so it doesn't take up a ton of space
+summary(full$Color)[1:40]
+str(full$Color)
+```
+
+Not much explanation needed here, just way too many different levels for one categorical variable. In order to chop up `Color` into something useful, let's extract the first word from each color, refactor the variable by these simpler colors, and see if we can narrow down the number of levels into something manageable.
+```{r}
+#creating shortened color variable
+full$shortcolor<-sapply(as.character(full$Color), function(x) strsplit(x,"/| ")[[1]][1])
+full$shortcolor<-factor(full$shortcolor)
+summary(full$shortcolor)
+str(full$shortcolor)
+```
+
+Some of these colors really are ridiculous, I wish whoever was in charge of coming up with animal colors would leave the poetic influences at home and just call them stuff like "red" or "orange" instead of "flame". I mean come on guys, really.
+
+Rant aside, our new color variable is in much better shape than our original one. We only have 29 different levels now instead of 400+, and I think I can even cut down a few more by combining some of the smaller, more unique colors. Agouti is a sort of brownish orangish mix, so we can put all the "agouti" colors into the "orange" category (I'm using some discretion here, I feel having tints of orange disqualifies the "agouti" animals from being considered brown). We can also put the "ruddy" colored animals into the "orange" group since that's also fairly close to an orange color, and finally we can put the "pink" animals into the "lilac" group since that's close enough as well.
+```{r}
+#reassigning color values
+full$shortcolor[full$shortcolor=="Agouti"]<-"Orange"
+full$shortcolor[full$shortcolor=="Ruddy"]<-"Orange"
+full$shortcolor[full$shortcolor=="Pink"]<-"Lilac"
+full$shortcolor<-factor(full$shortcolor)
+summary(full$shortcolor)
+str(full$shortcolor)
+```
+
+Ok, that's a little better. Now we're just left with the challenge of either visualizing the relationship between `shortcolor` and `Outcometype` or coming up with some kind of table to inform us of how each animal color is distributed among the five different outcome types. Let's try to make a bar chart similar to our other categorical visualizations.
+```{r}
+#plotting 'shortcolor' vs. 'OutcomeType'
+ggplot(full[full$data=="train",],aes(x=shortcolor,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      labs(x="Animal Color",y="Proportion of Animals",title="Outcome Type Based on Animal Color")+
+      theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.3))
+```
+
+There isn't a ton of variation in outcomes from one color to the next, but there are a few color categories that definitely have different likelihoods for different outcomes. Let's plot out the data with facets for cats and dogs to see if certain colors have different outcome probabilities for cats than they do for dogs.
+```{r}
+#plotting 'shortcolor' vs. 'OutcomeType' for cats and dogs
+ggplot(full[full$data=="train",],aes(x=shortcolor,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Animal Color",y="Proportion of Animals",title="Outcome Type for Cats and Dogs Based on Animal Color")+
+      theme(axis.text.x= element_text(angle=90,hjust=1,vjust=0.3))
+```
+
+The plot is a little messy since some colors are only present for either cats or dogs (and not both), but it appears (at least on the surface) that there are still some interesting things going on with certain colors depending on the species of animal. One bar that stands out is tan colored cats. I originally thought that since this bar had a 100% adoption rate it meant something significant, but it turns out there's only `r nrow(full[full$AnimalType=="Cat"&full$shortcolor=="Tan",])` tan colored cat so it actually means nothing.
+
+This brings me to my next point. After realizing that a lot of the color categories with drastically different outcome probabilities had very few animals in them, I realized that the variance between each color category was not actually due to different colors resulting in different outcomes but instead caused by certain color categories having very few animals in them (and thus having skewed outcomes due to having a small sample size). This is a cause for concern since our model, when trained on our training data, may give tan colored cats a much higher chance of being adopted when in reality they are no more likely to be adopted than other colors (that's just one hypothetical example). Scientifically speaking, there shouldn't be any reason why certain colors would have drastically different outcomes than other colors. There may be small differences in outcome likelihoods from one color to another, but there shouldn't be anything drastically different. For example, tan colored cats shouldn't actually be far more likely to be adopted than cats with other color fur; we just don't have enough observations for certain categories, which leads to certain colors having skewed outcomes. This will cause our model to have higher variance, since if it actually came to predict higher adoption rates for tan colored cats (as an example) it would be overfitted on the training data.
+
+I made the following data frame to show the number of observations in each color category, split by dogs and cats.
+```{r}
+#data frame with number of animals per color
+colors<-data.frame(full %>% 
+                         group_by(shortcolor,AnimalType) %>% 
+                         summarise(count=n()) %>% 
+                         arrange(desc(count)) %>% 
+                         rename(color=shortcolor,animal=AnimalType))
+colors
+```
+
+We can quickly see that there are a number of colors that, for either cats or dogs only, have very, very few occurences. Feeding these categories to our `randomForest` model would end up overfitting it on our training data; it would end up having higher variance due to assigning incorrectly high or low probabilities to certain animals in those low-observation color groups. This is something that should be avoided.
+
+To illustrate how color groups with less observations have more variance (due to their samples not being accurate representations of the true population), I created the function below:
+```{r}
+colorcount<-function(cnt,under=FALSE){
+      if(under==FALSE){
+            data<-colors %>% filter(count>=cnt)
+            titletext<-paste("Outcome Type for Cats and Dogs Based on Animal Color",
+                             "\n Only Showing Colors w/",cnt,"or More Occurences")
+      }
+      if(under==TRUE){
+            data<-colors %>% filter(count<=cnt)
+            titletext<-paste("Outcome Type for Cats and Dogs Based on Animal Color",
+                             "\n Only Showing Colors w/",cnt,"or Less Occurences")
+      }
+      if(!is.logical(under)){
+            stop("argument 'under' must be logical",call.=FALSE)
+      }
+      newdata<-data.frame()
+      for(i in 1:nrow(data)){
+            colordata<-full %>% filter(shortcolor==data$color[i]&AnimalType==data$animal[i]&data=="train")
+            newdata<-rbind(newdata,colordata)
+      }
+      ggplot(newdata,aes(x=shortcolor,fill=OutcomeType))+
+            geom_bar(position="fill",color="black")+
+            facet_grid(.~AnimalType)+
+            labs(x="Animal Color",y="Proportion of Animals",title=titletext)+
+            theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.3))+
+            theme(plot.title=element_text(hjust=0.5))
+}
+```
+
+This function first pulls out all the observations from the main data set that have colors with a specified minimum number of occurences and then plots the relationship between those color categories and `OutcomeType`. This is to filter out any color groups with a low number of occurences and thus a high variance. This function takes one input, `cnt`, which is the minimum count that color categories must have to be included in the plot. It uses the `colors` data frame created above to specify which colors to include (based on the colors that have a count greater than `cnt`). The argument `under=FALSE` tells the function to only choose color categories with `count>=cnt`; `under=TRUE` will tell the function to only choose color categories with `count<=cnt`. The two `if` statements at the beginning of the function select the appropriate data based on the argument `under` and also specify the correct title for the plot. Then, the data is gathered up and plotted.
+
+Let's give this function a test drive to explore how the variance in `OutcomeType` based on `shortcolor` changes as the number of observations in each color group increases. I will bring up our previous plot with all color categories included for cats and dogs as a starting point in our investigation.
+```{r}
+#plotting 'shortcolor' vs. 'OutcomeType' for cats and dogs
+ggplot(full[full$data=="train",],aes(x=shortcolor,fill=OutcomeType))+
+      geom_bar(position="fill",color="black")+
+      facet_grid(.~AnimalType)+
+      labs(x="Animal Color",y="Proportion of Animals",title="Outcome Type for Cats and Dogs Based on Animal Color")+
+      theme(axis.text.x= element_text(angle=90,hjust=1,vjust=0.3))
+```
+
+Let's see what changes when we use only colors with `count>=100`.
+```{r}
+colorcount(100)
+```
+
+We immediately see that a lot of the really wild/oddball color categories (the ones with very strange outcome distributions) have disappeared. The outcomes for cats are more similar to eachother and the same goes for dogs. This shows that the color categories with less than 100 observations have wildly high variance due to having an insufficiently large sample size and will throw off our model.
+
+I'm going to move through `colorcount(250)`, `colorcount(500)`, and `colorcount(1000)` to show you how the variances in each color category decrease as the number of observations increases.
+```{r}
+colorcount(250)
+colorcount(500)
+colorcount(1000)
+```
+
+Starting at `count>=250`, we can see yet another improvement in terms of how variances become more similar to eachother. `colorcount(500)` shows that colors with at least 500 observations have even more similar outcome distributions, and `colorcount(1000)` shows that color categories with at least 1000 observations have near equal probability distributions. I'll include `colorcount(2000)` and `colorcount(3000)` below just to drive the point home.
+```{r}
+colorcount(2000)
+colorcount(3000)
+```
+
+It is really easy to see that as the number of observations in a color category increases, the probability distribution for that category becomes more and more similar to other high-count categories. This evidence suggests that the probability distributions for the total population of each color category are actually equal to eachother, and that the variance we see in lower-count colors within our data set is caused by the sample sizes of those colors being too small and thus not indicative of the true relationship in the population.
+
+To highlight the high variance between lower-count color groups, let's use our `colorcount` function again but this time with `under=TRUE`. I will show `colorcount(250,under=TRUE)`, `colorcount(100,under=TRUE)`, and `colorcount(50,under=TRUE)`.
+```{r}
+colorcount(250,under=TRUE)
+colorcount(100,under=TRUE)
+colorcount(50,under=TRUE)
+```
+ We can clearly see that as the number of observations per color group decreases, the variance in the outcome probabilities between classes increases. This is further evidence pointing to the fact that different colors don't actually have different outcomes and only appear to due to a small sample size.
+
+####So What's the Point?
+The point is this: animal color does not actually help explain animal outcomes. We have seen that as the number of observations gets up towards 1000, the outcomes for each color group get more and more similar, which leads me to believe that the color groups with small sample sizes would also take on similar outcome probabilities if we had sufficient data. Are there differences between color categories in the probabilities of each outcome occuring? Sure, but they are very small differences. I'll show this below:
+```{r}
+#these are the color categories we will be looking at
+data<-colors %>% filter(count>=1000)
+data
+
+#now we assemble the data, similarly to how our 'colorcount' function does it
+newdata<-data.frame()
+for(i in 1:nrow(data)){
+      colordata<-full %>% filter(shortcolor==data$color[i]&AnimalType==data$animal[i]&data=="train")
+      newdata<-rbind(newdata,colordata)
+}
+cat.newdata<-newdata %>% filter(AnimalType=="Cat") %>% mutate(shortcolor=factor(shortcolor))
+dog.newdata<-newdata %>% filter(AnimalType=="Dog") %>% mutate(shortcolor=factor(shortcolor))
+
+#finally we make the tables for 'OutcomeType' based on cat and dog color categories
+cat.table<-prop.table(table(cat.newdata$shortcolor,cat.newdata$OutcomeType),1)
+dog.table<-prop.table(table(dog.newdata$shortcolor,dog.newdata$OutcomeType),1)
+
+#adding titles to avoid confusion
+names(dimnames(cat.table))<-list("","Cats")
+names(dimnames(dog.table))<-list("","Dogs")
+
+#printing tables
+cat.table
+dog.table
+```
+
+As we can see, the probability of each outcome occuring does vary between the different high-count color categories, but only very slightly. This goes for both cats and dogs. If we had enough samples for all the different color categories, then including this data would be helpful to our model (even if only offering the slightest of improvements in classification error rate), but alas we do not.
+
+**The Bottom Line:** Including this variable in our model would likely increase the variance of our final model and decrease its predictive accuracy, as it would look at future data and come to certain conclusions about future animal outcomes based on that animal's color that are simply untrue. This would be due to the model being trained on data that does not adequately represent the full populations of certain color groups. I will try running our model once with this variable included and once with it excluded to see if there's a noticeable difference in test-set performance, but my hunch is that our model would be better off without this predictor in it.
+
+***
+
+##Building our Final Model
+Well, it certainly took quite a while to make it here, but here we are at last. It has come time to bundle up our finalized predictors and build our `randomForest` model to predict the outcomes of future animals.
+
+###Variables to be Included in the Model
+Just to review, here are the variables we will be including in our model:
+
+**Original Predictors to be Included:**
+
+* `AnimalType` *whether or not the animal is a cat or a dog*
+* `SexuponOutcome` *the animal's sexual organ intactness (spayed/neutered, intact, or unknown) and its gender (male/female)*
+
+**Custom Predictors to be Included:**
+
+* `nameless` *whether or not the animal has a name*
+* `timeofday` *during what time of day the animal's outcome occurred*
+* `dayofweek` *what day of the week the animal's outcome occurred on*
+* `month` *what month of the year the animal's outcome occurred in*
+* `agecont` *the animal's age in days*
+* `mix` *whether or not the animal a pure breed or mixed breed*
+* `shortcolor` *the animal's color* **(we will try one model with this variable and one without)**
+
+###Making our Model
+Thanks to the program R and a bunch of people putting in their time, effort, and hardwork to make packages like `randomForest`, the task of actually building the final model is very easy. In fact, it comes down to just one line of code. However, there are some small things we can do to try to improve its performance. One of those tricks will be trying different size trees during the execution of the random forest algorithm. For random forest models to be used in the classification setting, it's common to use subtrees with size `m=sqrt(p)`, but we can also experiment with different size subtrees. Since we're using 7 predictors in our model, `m=sqrt(p)` would be equal to `r sqrt(7)`, so I'll try building models with subtrees of size `m=1`, `m=2`, `m=3`, and `m=4`.
+```{r}
+#building random forest model with m=1
+animal.1<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix,
+                        data=full[full$data=="train",],ntree=600,mtry=1)
+
+#building random forest model with m=2
+animal.2<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix,
+                        data=full[full$data=="train",],ntree=600,mtry=2)
+
+#building random forest model with m=3
+animal.3<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix,
+                        data=full[full$data=="train",],ntree=600,mtry=3)
+
+#building random forest model with m=4
+animal.4<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix,
+                        data=full[full$data=="train",],ntree=600,mtry=4)
+
+#looking at all four models
+animal.1
+animal.2
+animal.3
+animal.4
+```
+
+Looking at our four models, we can see that `animal.1` (the model with `mtry=1`) performed the worst with an OOB error rate of 38.43% and `animal.3` (the model with `mtry=3`) performed best with an OOB error rate of 32.19% (although the performance of `animal.2`, `animal.3`, and `animal.4` were all fairly close). We will use `animal.3` for evaluation on the test set.
+
+Now let's build our model with the variable `shortcolor` included. I will use the same approach of building four different models with different values for `mtry`, ranging from `mtry=1` to `mtry=4`. This could take a while (if anyone out there is running my script on their own computer), so sorry in advance. I just want to be thorough.
+```{r}
+#building random forest model with m=1
+color.1<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix+shortcolor,
+                        data=full[full$data=="train",],ntree=600,mtry=1)
+
+#building random forest model with m=2
+color.2<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix+shortcolor,
+                        data=full[full$data=="train",],ntree=600,mtry=2)
+
+#building random forest model with m=3
+color.3<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix+shortcolor,
+                        data=full[full$data=="train",],ntree=600,mtry=3)
+
+#building random forest model with m=4
+color.4<-randomForest(OutcomeType~AnimalType+SexuponOutcome+nameless+timeofday+dayofweek+month+agecont+mix+shortcolor,
+                        data=full[full$data=="train",],ntree=600,mtry=4)
+
+#looking at all four models
+color.1
+color.2
+color.3
+color.4
+```
+
+Our random forest model with `shortcolor` included performed very similarly to our model without it. The worst performing model was `color.1` with an OOB error rate of 38.61% and our best performing model was `color.3` with an OOB error rate of 32.23%. Comparing OOB error rates, `animal.3` and `color.3` performed very, very similarly, with a difference in OOB error rates of only 0.04%. However, performance on the test set is what we really want to use to compare the performance of these two models, so let's go ahead and evaluate both models' performance on the test set now.
+
+###Assessing Test Set Performance
+```{r}
+#predicting 'OutcomeType' for the test set
+animal.pred<-predict(animal.3,full[full$data=="test",],type="vote")
+color.pred<-predict(color.3,full[full$data=="test",],type="vote")
+
+#attaching animal IDs to predictions
+animal.pred<-data.frame("ID"=full$AnimalID[full$data=="test"],animal.pred)
+color.pred<-data.frame("ID"=full$AnimalID[full$data=="test"],color.pred)
+
+#writing predictions to csv file so we can submit to kaggle and see which one performed better
+write.csv(animal.pred,"animal_predictions.csv",row.names=F)
+write.csv(color.pred,"animal_predictions_with_color.csv",row.names=F)
+```
+
+Ok, so after submitting both .csv files to kaggle and checking their log-loss scores, we now have the results as to which model is better. Our `animal.3` model (the one without `shortcolor`) scored a log-loss metric of 1.31974 (lower is better), and our `color.3` model (the one with `shortcolor`) scored a log-loss metric of...
+ 
+*insert drumroll here*
+ 
+0.96428. Well what do you know, I stand corrected! I was ready to put my life savings down on the fact that `animal.3` would perform better, but hey, I'm glad I didn't. Given that this is my first real data science project, I still have a lot to learn, but we'll make it there one day.
+
+#####Our model `color.3` performed best on the test set, so this is the model we will go with as our final production model.
+
+###Visualizing our Model's Performance and Assessing Variable Importance
+Now that it's clear which model we've chosen for our final model, let's look at its performance visually and go over the variable importances of each variable in the model. Credit goes to Megan Risdal for the code to construct these plots. It seems that I'm adding new tools to my data science bag of tricks every day.
+```{r}
+#plotting model performance
+plot(color.3, ylim=c(0.1,1),main="Error Rates for 'color.3'")
+legend("topright", colnames(color.3$err.rate),fill=1:6)
+
+#creating function for plotting variable importance (I'm making a function so that this will be quicker next time I need to do this)
+VIplot<-function(RFmod,...){
+      suppressMessages(require(randomForest))
+      VI<-importance(RFmod,...)
+      VI<-data.frame(vars=row.names(VI),imp=VI[,1])
+      suppressMessages(require(dplyr))
+      VI<-VI %>% arrange(desc(imp))
+      VI$vars<-factor(VI$vars,levels=rev(VI$vars))
+      for(i in 1:nrow(VI)){
+            VI$rank[i]<-paste0("#",i)
+      }
+      suppressMessages(require(ggplot2))
+      ggplot(VI,aes(x=vars,y=imp))+
+            geom_bar(stat="identity",color="black")+
+            coord_flip()+
+            geom_text(aes(x=vars,y=max(VI$imp)/100,label=rank),hjust=0,vjust=0.55,size=4,color="white")+
+            labs(x="Variables",y="Mean Decrease in Gini Index",title="Relative Variable Importance")
+}
+
+#plotting variable importance
+VIplot(color.3)
+```
+
+Looking at our error rate plot, we can see that our model does a great job of predicting adoptions and transfers but is very poor at correctly predicting deaths and euthanizations. I believe that this is due to the majority of our observations having either adoption or transfer as their outcomes while a very small amount die or get euthanized. The small sample of animals that died or where euthanized makes it harder for the model to pick up on what features result in these outcomes, since its essentially grasping at straws when it tries to correctly classify those outcomes. All things considered, I still think this is the best model we can come up with given the situation, so we'll just have to accept this as the current state of affairs and make note of this moving forward (especially if this model were to ever be used to predict more animals' outcomes).
+
+Looking at the variable importance plot, we can see that `agecont` (an animal's age in days) is the most important variable, closely followed by `SexuponOutcome` (the animal's gender and sexual organ intactness) and `shortcolor` (the animal's color). The `shortcolor` variable being so high up was a bit of a surprise to me (for reasons covered previously), but the other two variables make a lot of sense. One other surprise to me is that `AnimalType` is so far down the list of important variables, ranking in as 8th most important out of 9 variables. I feel like `AnimalType` helps improve our model significantly, since as we saw in the previous sections, the relationship between many of our variables and `OutcomeType` varied greatly based on whether or not the animal was a cat or a dog. That being said, our measure of variable importance (mean decrease in the gini index for terminal nodes that are split on that variable) focuses on terminal nodes that are determined by `AnimalType`, and `AnimalType` is probably much more useful as a split farther up the tree than as a terminal node (this would explain its relatively low variable importance).
+
+All things considered, we have a pretty solid model based on a thorough exploration of our data set (given this being my first real project).
+
+##Concluding Thoughs and Potential Improvements
+To conclude, I'm very happy with how this project turned out. I got to touch up my knowledge of data exploration and the model building process, and flexing my R abilities to make everything come together the way it did was a great exercise that helped me solidify my existing knowledge and learn some more new things.
+
+But where could we have improved? If I had the technical know-how, I would try creating a boosted classification tree model instead of a random forest. Using boosting as a learning algorithm would allow our model to improve its performance in areas it's performing poorly, like predicting euthanizations and death. The main reason I did not go this route is that I have yet to acquire the technical knowledge necessary to properly implement a boosted classification tree model in R; I'm only 8 chapters deep into Introduction to Statistical Learning and 3 chapters into Applied Predictive Modeling. Another improvement over boosting would be to create an ensemble of boosting and other models (like random forest) in conjunction. This would offer a further improvement in performance. Also, as previously mentioned in our exploration of the variable `Breed`, if we had more knowledge about different breeds and their respective characteristics we could try creating other variables (determined by the animal's breed) that may help explain animals' outcomes. This may be hard though, since not every animal will be a stereotype of its breed; if the data set also included values for variables like height and weight, I suspect our model would do a much better job of predicting euthanasia and death (it would be able to find animals that are old and have weight problems, indicating imminent death). Another idea would be to look at each animal's breed and find the average age for each breed; if the animal in question exceeding the average age of its breed, I suspect it would be more likely to die or be euthanized as well.
+
+Thank you for reading my project, any feedback would be highly appreciated and fully welcomed. Feel free to email me at n_martinez@u.pacific.edu with any tips or suggestions.
