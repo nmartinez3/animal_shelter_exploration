@@ -1,4 +1,4 @@
-Unfortunately, github can't display the final write up for this project in its intended form, so please **go to this url** http://htmlpreview.github.io/?https://github.com/nmartinez3/animal_shelter_exploration/blob/master/animal_shelter_exploration_and_analysis.html to view my final project.
+**Unfortunately, github can't display the final write up for this project in its intended form, so please go to this url** http://htmlpreview.github.io/?https://github.com/nmartinez3/animal_shelter_exploration/blob/master/animal_shelter_exploration_and_analysis.html **to view my final project.**
 ***
 Hey guys, this is a project I did for the Austin Animal Center where I looked at over 38,000+ animals in Austin, TX animal shelters and built a statistical model to predict future animal outcomes. In this project, I...
 
