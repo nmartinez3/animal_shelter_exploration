@@ -1,6 +1,6 @@
 # Austin, TX Animal Shelter Data Exploration (Kaggle)
 
-**[Analysis here](http://htmlpreview.github.io/?https://github.com/nmartinez3/animal_shelter_exploration/blob/master/animal_shelter_exploration_and_analysis.html)**
+**[Analysis here](http://htmlpreview.github.io/?https://github.com/nmartinez3/animal_shelter_exploration/blob/master/animal_shelter_exploration_and_analysis.html).** Workbook in R.
 ***
 This is a project I did through Kaggle on data from the Austin Animal Center where I looked at 38,000+ shelter dogs and cats in Austin, TX and built a statistical model to predict their outcomes from the shelter (adopted, death :(, others). Among other things, I:
 
